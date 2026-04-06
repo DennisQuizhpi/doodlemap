@@ -22,6 +22,7 @@ export interface NeighborhoodFeatureProperties {
   borough: string;
   type: NeighborhoodType;
   hasDoodle?: boolean;
+  doodleStrokes?: DoodleStroke[];
 }
 
 export interface NeighborhoodFeature {

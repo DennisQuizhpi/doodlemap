@@ -15,7 +15,7 @@ type MapLibreMap = {
   off: (event: string, listener: (...args: unknown[]) => void) => void;
   remove: () => void;
   addSource: (id: string, source: unknown) => void;
-  addLayer: (layer: unknown) => void;
+  addLayer: (layer: unknown, beforeId?: string) => void;
   getSource: (id: string) => { setData: (data: unknown) => void } | undefined;
   setPaintProperty: (layerId: string, name: string, value: unknown) => void;
   fitBounds: (
@@ -182,6 +182,103 @@ function toGeoJson(features: NeighborhoodFeature[]) {
   };
 }
 
+function toDoodleLineGeoJson(features: NeighborhoodFeature[]) {
+  const lineFeatures = features.flatMap((feature) => {
+    const strokes = feature.properties.doodleStrokes ?? [];
+    if (feature.properties.type !== "residential" || strokes.length === 0) {
+      return [];
+    }
+
+    const [[minLng, minLat], [maxLng, maxLat]] = geometryBounds(feature);
+    const lngSpan = maxLng - minLng;
+    const latSpan = maxLat - minLat;
+
+    if (lngSpan <= 0 || latSpan <= 0) {
+      return [];
+    }
+
+    const inset = 0.08;
+    const innerMinLng = minLng + lngSpan * inset;
+    const innerMaxLng = maxLng - lngSpan * inset;
+    const innerMinLat = minLat + latSpan * inset;
+    const innerMaxLat = maxLat - latSpan * inset;
+
+    return strokes.flatMap((stroke) => {
+      if (!stroke.points || stroke.points.length < 2) {
+        return [];
+      }
+
+      const coordinates = stroke.points.map((point) => {
+        const x = Math.max(0, Math.min(1, point.x));
+        const y = Math.max(0, Math.min(1, point.y));
+        const lng = innerMinLng + (innerMaxLng - innerMinLng) * x;
+        const lat = innerMaxLat - (innerMaxLat - innerMinLat) * y;
+        return [lng, lat];
+      });
+
+      return [
+        {
+          type: "Feature",
+          properties: {
+            ntaCode: feature.properties.ntaCode,
+            strokeColor: stroke.color,
+            strokeWidth: stroke.width,
+          },
+          geometry: {
+            type: "LineString",
+            coordinates,
+          },
+        },
+      ];
+    });
+  });
+
+  return {
+    type: "FeatureCollection",
+    features: lineFeatures,
+  };
+}
+
+function buildNeighborhoodPreviewPath(feature: NeighborhoodFeature, width: number, height: number) {
+  const polygons =
+    feature.geometry.type === "Polygon"
+      ? [feature.geometry.coordinates]
+      : feature.geometry.coordinates;
+  const [[minLng, minLat], [maxLng, maxLat]] = geometryBounds(feature);
+
+  const safeLngSpan = Math.max(maxLng - minLng, 0.000001);
+  const safeLatSpan = Math.max(maxLat - minLat, 0.000001);
+  const padding = 12;
+  const scale = Math.min((width - padding * 2) / safeLngSpan, (height - padding * 2) / safeLatSpan);
+  const drawWidth = safeLngSpan * scale;
+  const drawHeight = safeLatSpan * scale;
+  const offsetX = (width - drawWidth) / 2;
+  const offsetY = (height - drawHeight) / 2;
+
+  function projectPoint(point: [number, number]) {
+    const x = (point[0] - minLng) * scale + offsetX;
+    const y = height - ((point[1] - minLat) * scale + offsetY);
+    return [x, y] as const;
+  }
+
+  return polygons
+    .flatMap((polygon) =>
+      polygon.map((ring) => {
+        if (ring.length === 0) {
+          return "";
+        }
+
+        const commands = ring.map((point, index) => {
+          const [x, y] = projectPoint(point);
+          return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+        });
+
+        return `${commands.join(" ")} Z`;
+      })
+    )
+    .join(" ");
+}
+
 function loadMapLibreScript(): Promise<MapLibreNamespace> {
   return new Promise((resolve, reject) => {
     const existing = (globalThis as { maplibregl?: MapLibreNamespace }).maplibregl;
@@ -228,12 +325,21 @@ export function MapDoodler() {
   const [doodleDoc, setDoodleDoc] = useState<DoodleDocument | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isCanvasOpen, setIsCanvasOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [counts, setCounts] = useState({ total: 0, doodled: 0, remaining: 0, completionPct: 0 });
 
   const selectedFeature = useMemo(
     () => features.find((feature) => feature.properties.ntaCode === selectedCode) ?? null,
     [features, selectedCode]
   );
+
+  const previewPath = useMemo(() => {
+    if (!selectedFeature) {
+      return "";
+    }
+    return buildNeighborhoodPreviewPath(selectedFeature, 132, 88);
+  }, [selectedFeature]);
 
   const loadNeighborhoods = useCallback(async () => {
     setLoading(true);
@@ -277,11 +383,27 @@ export function MapDoodler() {
   useEffect(() => {
     if (!selectedCode) {
       setDoodleDoc(null);
+      setIsCanvasOpen(false);
       return;
     }
 
     void loadDoodle(selectedCode);
   }, [selectedCode, loadDoodle]);
+
+  useEffect(() => {
+    if (!isCanvasOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsCanvasOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isCanvasOpen]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -442,6 +564,8 @@ export function MapDoodler() {
             }
 
             setSelectedCode(ntaCode);
+            setIsCanvasOpen(false);
+
             const nextFeature = featuresRef.current.find(
               (feature) => feature.properties.ntaCode === ntaCode
             );
@@ -488,25 +612,43 @@ export function MapDoodler() {
     const payload = (await response.json()) as { doodle: DoodleDocument };
     setDoodleDoc(payload.doodle);
     await loadNeighborhoods();
+    setIsCanvasOpen(false);
   }
 
-  async function clearDoodle() {
+  async function deleteDoodle() {
     if (!selectedCode) {
       return;
     }
 
-    await fetch(`/api/doodles/${encodeURIComponent(selectedCode)}`, {
-      method: "DELETE",
-    });
+    setIsDeleting(true);
+    try {
+      const response = await fetch(`/api/doodles/${encodeURIComponent(selectedCode)}`, {
+        method: "DELETE",
+      });
 
-    setDoodleDoc(null);
-    await loadNeighborhoods();
+      if (!response.ok) {
+        throw new Error("Unable to delete doodle");
+      }
+
+      setDoodleDoc(null);
+      await loadNeighborhoods();
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   return (
-    <div className="grid min-h-screen grid-cols-1 bg-[radial-gradient(circle_at_top,#f8fafc_20%,#e2e8f0_90%)] lg:grid-cols-[2fr_1fr]">
-      <section className="relative min-h-[420px] border-b border-zinc-300 lg:min-h-screen lg:border-r lg:border-b-0">
+    <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top,#f8fafc_0%,#e2e8f0_42%,#cbd5e1_100%)]">
+      <section className="relative h-screen w-full pb-44 sm:pb-40">
         <div ref={mapContainerRef} className="h-full w-full" />
+
+        <div className="pointer-events-none absolute left-4 top-4 rounded-2xl border border-zinc-300/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur-sm sm:left-6 sm:top-6">
+          <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">NYC Map Doodler</p>
+          <p className="text-sm font-semibold text-zinc-900">
+            {counts.doodled}/{counts.total} neighborhoods doodled ({counts.completionPct}%)
+          </p>
+        </div>
+
         {loading ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/60 text-sm font-semibold text-zinc-700 backdrop-blur-sm">
             Loading NYC neighborhoods...
@@ -514,68 +656,117 @@ export function MapDoodler() {
         ) : null}
       </section>
 
-      <aside className="flex flex-col gap-5 p-5 lg:p-7">
-        <header className="space-y-1">
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-900">NYC Map Doodler</h1>
-          <p className="text-sm text-zinc-700">
-            Draw the vibe of each neighborhood as you explore the city.
-          </p>
-        </header>
+      <div className="fixed inset-x-2 bottom-2 z-20 rounded-3xl border border-zinc-300/70 bg-white/92 p-3 shadow-2xl backdrop-blur-md sm:inset-x-6 sm:bottom-6 sm:p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="h-[88px] w-[132px] shrink-0 overflow-hidden rounded-xl border border-zinc-300 bg-zinc-100">
+              <svg viewBox="0 0 132 88" className="h-full w-full">
+                <rect x="0" y="0" width="132" height="88" fill="#f4f4f5" />
+                {previewPath ? (
+                  <path d={previewPath} fill="#bfdbfe" stroke="#1d4ed8" strokeWidth="1.8" />
+                ) : (
+                  <text x="66" y="48" textAnchor="middle" className="fill-zinc-500 text-[10px]">
+                    Select area
+                  </text>
+                )}
+              </svg>
+            </div>
 
-        <section className="rounded-lg border border-zinc-300 bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-semibold text-zinc-900">Progress</h2>
-          <p className="mt-2 text-sm text-zinc-700">Total playable: {counts.total}</p>
-          <p className="text-sm text-zinc-700">Doodled: {counts.doodled}</p>
-          <p className="text-sm text-zinc-700">Remaining: {counts.remaining}</p>
-          <p className="mt-2 text-base font-semibold text-zinc-900">
-            Completion: {counts.completionPct}%
-          </p>
-        </section>
+            <div className="min-w-0">
+              {selectedFeature ? (
+                <>
+                  <p className="truncate text-base font-semibold text-zinc-900">
+                    {selectedFeature.properties.name}
+                  </p>
+                  <p className="text-xs text-zinc-600">
+                    {selectedFeature.properties.ntaCode} · {selectedFeature.properties.borough}
+                  </p>
+                  {selectedFeature.properties.type === "special" ? (
+                    <p className="mt-1 text-xs font-medium text-amber-700">
+                      Special/non-residential area. Doodles are disabled.
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-sm text-zinc-600">Select a neighborhood on the map.</p>
+              )}
+            </div>
+          </div>
 
-        <section className="rounded-lg border border-zinc-300 bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-semibold text-zinc-900">Selected Neighborhood</h2>
-          {selectedFeature ? (
-            <>
-              <p className="mt-2 text-base font-semibold text-zinc-900">
-                {selectedFeature.properties.name}
-              </p>
-              <p className="text-sm text-zinc-700">
-                {selectedFeature.properties.ntaCode} · {selectedFeature.properties.borough}
-              </p>
-              {selectedFeature.properties.type === "special" ? (
-                <p className="mt-2 text-xs text-amber-700">
-                  This area is tagged as special/non-residential in NYC data.
-                </p>
-              ) : null}
-              <div className="mt-3">
-                <DoodleCanvas
-                  initialStrokes={doodleDoc?.strokes ?? []}
-                  onSave={saveDoodle}
-                  onClear={clearDoodle}
-                  disabled={selectedFeature.properties.type === "special"}
-                />
-              </div>
-            </>
-          ) : (
-            <p className="mt-2 text-sm text-zinc-600">
-              Select a neighborhood on the map to start doodling.
-            </p>
-          )}
-        </section>
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedFeature && selectedFeature.properties.type !== "special" ? (
+              doodleDoc ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setIsCanvasOpen(true)}
+                    className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800"
+                  >
+                    Edit doodle
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (window.confirm("Delete this doodle for the selected neighborhood?")) {
+                        await deleteDoodle();
+                      }
+                    }}
+                    disabled={isDeleting}
+                    className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isDeleting ? "Deleting..." : "Delete"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setIsCanvasOpen(true)}
+                  className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800"
+                >
+                  Add a doodle
+                </button>
+              )
+            ) : null}
+          </div>
+        </div>
 
-        <footer className="mt-auto rounded-lg border border-zinc-300 bg-white p-3 text-xs text-zinc-600 shadow-sm">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-x-5 gap-y-1 border-t border-zinc-200 pt-2 text-[11px] text-zinc-500">
           <p>Boundary source ID: {sourceViewId}</p>
           <p>
-            Dataset fetched:{" "}
-            {sourceFetchedAt
-              ? new Date(sourceFetchedAt).toLocaleString()
-              : "using bundled fallback"}
+            Dataset fetched: {sourceFetchedAt ? new Date(sourceFetchedAt).toLocaleString() : "fallback"}
           </p>
-          <p>Map data attribution: OpenStreetMap contributors.</p>
-          <p>For production, use a dedicated OSM-derived tile provider or self-host tiles.</p>
-          {error ? <p className="mt-2 font-semibold text-rose-700">{error}</p> : null}
-        </footer>
-      </aside>
+          <p>Map data: OpenStreetMap contributors.</p>
+          {error ? <p className="font-semibold text-rose-700">{error}</p> : null}
+        </div>
+      </div>
+
+      {isCanvasOpen && selectedFeature && selectedFeature.properties.type !== "special" ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 p-3 backdrop-blur-sm sm:p-6">
+          <div className="w-full max-w-5xl rounded-2xl border border-zinc-200 bg-white p-4 shadow-2xl sm:p-6">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900">{selectedFeature.properties.name}</h2>
+                <p className="text-sm text-zinc-600">
+                  {selectedFeature.properties.ntaCode} · {selectedFeature.properties.borough}
+                </p>
+                <p className="text-xs text-zinc-500">Use Clear to reset the draft, then Save to persist.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCanvasOpen(false)}
+                className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+              >
+                Close
+              </button>
+            </div>
+            <DoodleCanvas
+              initialStrokes={doodleDoc?.strokes ?? []}
+              onSave={saveDoodle}
+              canvasClassName="h-[55vh] min-h-[360px]"
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

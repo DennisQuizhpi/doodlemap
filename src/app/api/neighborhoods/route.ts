@@ -10,11 +10,14 @@ export async function GET(request: NextRequest) {
 
   const features = dataset.features.map((feature) => {
     const ntaCode = feature.properties.ntaCode;
+    const doodle = doodles[ntaCode];
+    const hasDoodle = Boolean(doodle && doodle.strokes.length > 0);
     return {
       ...feature,
       properties: {
         ...feature.properties,
-        hasDoodle: Boolean(doodles[ntaCode]),
+        hasDoodle,
+        doodleStrokes: hasDoodle ? doodle?.strokes ?? [] : undefined,
       },
     };
   });
