@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Doodlemap
 
-## Getting Started
+NYC neighborhood map doodler game built with Next.js.
 
-First, run the development server:
+## What It Does
+
+- Loads NYC 2020 Neighborhood Tabulation Areas (NTAs) from NYC Open Data (`9nt8-h7nd`)
+- Renders neighborhoods on an interactive map
+- Lets users select a neighborhood and draw a doodle representing its vibe
+- Saves one doodle per `nta_code` and supports view/edit/clear flows
+- Tracks map completion progress (`doodled / total playable`)
+
+## Stack
+
+- Next.js (App Router)
+- TypeScript
+- Tailwind CSS v4
+- MapLibre GL JS (loaded from CDN at runtime)
+
+## Requirements
+
+- Node.js 20+
+- npm 10+
+
+## Quick Start
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App runs at [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run dev           # Start dev server
+npm run build         # Production build
+npm run start         # Run production build
+npm run fetch:nta     # Fetch + normalize NYC NTA GeoJSON into src/data/nyc-nta-2020.json
+npm run lint          # Lint entire repo
+npm run lint:fix      # Lint + auto-fix
+npm run typecheck     # TypeScript type check
+npm run format        # Prettier write
+npm run format:check  # Prettier check
+npm run check         # Lint + typecheck + format check
+```
 
-## Learn More
+## API Contract
 
-To learn more about Next.js, take a look at the following resources:
+- `GET /api/neighborhoods`
+  - Returns normalized NTA features with `ntaCode`, `name`, `borough`, `type`, `hasDoodle`
+  - Returns progression counters (`total`, `doodled`, `remaining`, `completionPct`)
+- `GET /api/doodles/:ntaCode`
+  - Returns doodle document or `null`
+- `PUT /api/doodles/:ntaCode`
+  - Upserts doodle as vector strokes
+- `DELETE /api/doodles/:ntaCode`
+  - Clears doodle for neighborhood
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Data + Persistence
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Neighborhood boundary source:
+  - NYC Open Data view ID `9nt8-h7nd`
+- Doodle storage:
+  - JSON file in temp dir (`$TMPDIR/doodlemap/doodles.json`)
 
-## Deploy on Vercel
+## Attribution
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Neighborhood boundaries: NYC Open Data
+- Basemap data: OpenStreetMap contributors
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Production Note
+
+Do not rely on OSM Foundation default tile servers (`tile.openstreetmap.org`) for production traffic. Use a dedicated OSM-derived provider or self-host vector/raster tiles.
