@@ -420,6 +420,20 @@ export function MapDoodler() {
   }, [features]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+
+    const source = map.getSource("doodle-lines-source");
+    if (!source) {
+      return;
+    }
+
+    source.setData(toDoodleLineGeoJson(features));
+  }, [features]);
+
+  useEffect(() => {
     featuresRef.current = features;
   }, [features]);
 
@@ -537,6 +551,26 @@ export function MapDoodler() {
             paint: {
               "fill-color": "rgba(0,0,0,0)",
               "fill-opacity": 0.35,
+            },
+          });
+
+          map.addSource("doodle-lines-source", {
+            type: "geojson",
+            data: toDoodleLineGeoJson(featuresRef.current),
+          });
+
+          map.addLayer({
+            id: "nta-doodle-background",
+            type: "line",
+            source: "doodle-lines-source",
+            paint: {
+              "line-color": ["coalesce", ["get", "strokeColor"], "#111827"],
+              "line-width": [
+                "*",
+                ["coalesce", ["get", "strokeWidth"], 2],
+                ["interpolate", ["linear"], ["zoom"], 9, 0.9, 15, 1.25],
+              ],
+              "line-opacity": 0.8,
             },
           });
 
